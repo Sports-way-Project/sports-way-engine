@@ -7,7 +7,6 @@ class Settings(BaseSettings):
     dolibarr_api_url: str
     dolibarr_api_key: str
     dolibarr_verify_ssl: bool = True
-    dolibarr_documents_root: str = ""
 
     cors_origins: str = "http://localhost:5173"
 

@@ -1,5 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.models.schemas import DolibarrProductResult
 from app.services import stock_service
@@ -24,16 +23,17 @@ async def list_all_products():
 async def get_product_photos(dolibarr_id: int):
     """Count of photos available for this Dolibarr product, used by the admin
     product-mapping page to know how many /photo?index=N calls to make."""
-    photo_paths = await stock_service.get_product_photo_paths(dolibarr_id)
-    return {"count": len(photo_paths)}
+    count = await stock_service.get_product_photo_count(dolibarr_id)
+    return {"count": count}
 
 
 @router.get("/{dolibarr_id}/photo")
 async def get_product_photo(dolibarr_id: int, index: int = 0):
-    """Product photo from Dolibarr's document store, used as a thumbnail in the
+    """Product photo fetched live from Dolibarr, used as a thumbnail in the
     admin search results (index 0) or copied into the gallery on import.
     404s if the product has no uploaded photo at that index."""
-    photo_paths = await stock_service.get_product_photo_paths(dolibarr_id)
-    if index < 0 or index >= len(photo_paths):
+    result = await stock_service.get_product_photo_bytes(dolibarr_id, index)
+    if not result:
         raise HTTPException(status_code=404, detail="No photo found for this product")
-    return FileResponse(photo_paths[index])
+    content, content_type = result
+    return Response(content=content, media_type=content_type)

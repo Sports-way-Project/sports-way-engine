@@ -1,6 +1,5 @@
-from pathlib import Path
+import mimetypes
 
-from app.core.config import settings
 from app.core.dolibarr_client import dolibarr_client
 from app.models.schemas import DolibarrProductResult, StockResult
 
@@ -71,29 +70,49 @@ async def get_live_stock(product_id: int, dolibarr_id: int) -> StockResult:
     )
 
 
-def _find_photo_paths(ref: str) -> list[Path]:
-    if not settings.dolibarr_documents_root or not ref:
+async def _list_product_photo_files(ref: str) -> list[dict]:
+    """Photo file entries from Dolibarr's own /documents listing (over
+    HTTP), not the local filesystem — see DolibarrClient.list_documents for
+    why this replaced the old DOLIBARR_DOCUMENTS_ROOT approach."""
+    if not ref:
         return []
-
-    product_dir = Path(settings.dolibarr_documents_root) / "produit" / ref
-    for search_dir in (product_dir / "photos", product_dir):
-        if not search_dir.is_dir():
-            continue
-        photos = sorted(
-            candidate for candidate in search_dir.iterdir()
-            if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTENSIONS
-        )
-        if photos:
-            return photos
-    return []
+    docs = await dolibarr_client.list_documents("produit", ref)
+    photos = [
+        d for d in docs
+        if isinstance(d, dict) and str(d.get("name", "")).lower().endswith(IMAGE_EXTENSIONS)
+    ]
+    photos.sort(key=lambda d: d.get("name", ""))
+    return photos
 
 
-async def get_product_photo_path(dolibarr_id: int) -> Path | None:
+def _document_original_file(ref: str, doc: dict) -> str:
+    """Builds the `original_file` path /documents/download expects, from a
+    /documents listing entry. Dolibarr's listing includes the file's
+    relative subdirectory (photos are usually under <ref>/photos/) — fall
+    back to just <ref>/<name> if that field isn't present."""
+    name = doc.get("name", "")
+    relpath = (doc.get("relpath") or doc.get("path") or "").strip("/")
+    return f"{ref}/{relpath}/{name}" if relpath else f"{ref}/{name}"
+
+
+async def get_product_photo_count(dolibarr_id: int) -> int:
     dolibarr_product = await dolibarr_client.get_product(dolibarr_id, include_stock=False)
-    photos = _find_photo_paths(dolibarr_product.get("ref", ""))
-    return photos[0] if photos else None
+    photos = await _list_product_photo_files(dolibarr_product.get("ref", ""))
+    return len(photos)
 
 
-async def get_product_photo_paths(dolibarr_id: int) -> list[Path]:
+async def get_product_photo_bytes(dolibarr_id: int, index: int = 0) -> tuple[bytes, str] | None:
+    """Returns (content, content_type) for one product photo, fetched live
+    from Dolibarr — or None if there's no photo at that index."""
     dolibarr_product = await dolibarr_client.get_product(dolibarr_id, include_stock=False)
-    return _find_photo_paths(dolibarr_product.get("ref", ""))
+    ref = dolibarr_product.get("ref", "")
+    photos = await _list_product_photo_files(ref)
+    if index < 0 or index >= len(photos):
+        return None
+    doc = photos[index]
+    original_file = _document_original_file(ref, doc)
+    content = await dolibarr_client.download_document_file("produit", original_file)
+    if not content:
+        return None
+    content_type = mimetypes.guess_type(doc.get("name", ""))[0] or "image/jpeg"
+    return content, content_type

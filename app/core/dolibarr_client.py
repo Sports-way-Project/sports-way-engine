@@ -88,10 +88,35 @@ class DolibarrClient:
         this call does not trigger generation itself, only fetches an
         existing file, to avoid guessing at Dolibarr's builddoc behavior
         without a live instance to verify it against)."""
+        return await self.download_document_file(modulepart, f"{ref}/{ref}.pdf")
+
+    async def list_documents(self, modulepart: str, ref: str) -> list[dict]:
+        """Lists files Dolibarr has stored for an object (e.g. a product's
+        photos) via its documented GET /documents endpoint. This talks to
+        Dolibarr over HTTP like everything else in this client — unlike the
+        old local-filesystem approach (reading DOLIBARR_DOCUMENTS_ROOT
+        directly), it works regardless of which machine FastAPI runs on,
+        since it never assumed shared disk access with Dolibarr in the
+        first place."""
+        client = await self._ensure_client()
+        response = await client.get(
+            "/documents",
+            params={"modulepart": modulepart, "id": 0, "ref": ref},
+        )
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        result = response.json()
+        return result if isinstance(result, list) else []
+
+    async def download_document_file(self, modulepart: str, original_file: str) -> bytes | None:
+        """Downloads one specific file via Dolibarr's /documents/download
+        endpoint, given the relative path returned by list_documents (or
+        constructed as f"{ref}/{ref}.pdf" for order/invoice PDFs)."""
         client = await self._ensure_client()
         response = await client.get(
             "/documents/download",
-            params={"modulepart": modulepart, "original_file": f"{ref}/{ref}.pdf"},
+            params={"modulepart": modulepart, "original_file": original_file},
         )
         if response.status_code == 404:
             return None
