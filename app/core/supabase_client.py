@@ -47,6 +47,23 @@ class SupabaseClient:
                 "SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY are not set in the backend's .env."
             )
 
+    async def get_site_setting(self, key: str) -> dict | None:
+        """Reads one row from `site_settings` (the same key/value store the
+        React admin panel's settings pages already write to via supabase-js).
+        Used to let a superadmin override Dolibarr/FastAPI config from
+        AdminIntegrationSettings without needing a new .env + redeploy for
+        every change. Returns None (not raises) on any failure — a bad/unset
+        Supabase config here should silently fall back to .env, not break
+        Dolibarr-facing endpoints that have nothing to do with Supabase."""
+        try:
+            response = await self._client.get("/site_settings", params={"select": "value", "key": f"eq.{key}"})
+        except httpx.HTTPError:
+            return None
+        if response.status_code >= 400:
+            return None
+        rows = response.json()
+        return rows[0]["value"] if rows else None
+
     async def list_orders(self, unlinked_only: bool = False) -> list[dict]:
         self._require_configured()
         params = {"select": "*", "order": "created_at.desc"}

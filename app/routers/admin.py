@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.supabase_client import SupabaseConfigError, supabase_client
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -58,6 +59,22 @@ async def delete_user(user_id: str, authorization: str | None = Header(None)):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {"deleted": True}
+
+
+@router.get("/integration-settings/defaults")
+async def get_integration_defaults(authorization: str | None = Header(None)):
+    """Returns the backend's current .env values for Dolibarr, so the
+    superadmin-only AdminIntegrationSettings screen can pre-fill its fields
+    with what's actually deployed instead of starting blank — mirrors how
+    FastAPI Base URL is already auto-read from window.FASTAPI_URL on the
+    frontend side. Superadmin-only since this returns real secrets
+    (dolibarr_api_key / dolibarr_sync_secret)."""
+    await _require_superadmin(authorization)
+    return {
+        "dolibarrApiUrl": settings.dolibarr_api_url,
+        "dolibarrApiKey": settings.dolibarr_api_key,
+        "dolibarrSyncSecret": settings.dolibarr_sync_secret,
+    }
 
 
 @router.get("/admins")

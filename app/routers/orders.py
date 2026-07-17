@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header, HTTPException, Query, Response
 
-from app.core.config import settings
 from app.core.dolibarr_client import dolibarr_client
+from app.core.integration_settings import get_dolibarr_config
 from app.core.supabase_client import SupabaseConfigError
 from app.models.schemas import OrderDetail, OrderListItem, OrderSyncRequest
 from app.routers.admin import _require_admin
@@ -15,12 +15,15 @@ DOCUMENT_KINDS = {
 }
 
 
-def _require_sync_secret(x_sync_secret: str | None) -> None:
+async def _require_sync_secret(x_sync_secret: str | None) -> None:
     """Gate for the one write path this API exposes. Read endpoints below
     are intentionally open (same trust level as the Dolibarr product-search
     endpoints) — only writes need the shared secret, since only writes can
-    change what the website shows customers."""
-    if not settings.dolibarr_sync_secret or x_sync_secret != settings.dolibarr_sync_secret:
+    change what the website shows customers. The expected secret can come
+    from a superadmin's Supabase override (AdminIntegrationSettings) or the
+    .env default — see get_dolibarr_config."""
+    config = await get_dolibarr_config()
+    if not config["sync_secret"] or x_sync_secret != config["sync_secret"]:
         raise HTTPException(status_code=401, detail="Invalid or missing X-Sync-Secret")
 
 
@@ -121,7 +124,7 @@ async def sync_order(order_id: str, payload: OrderSyncRequest, x_sync_secret: st
     invoice status changes (ORDER_VALIDATE, SHIPPING_VALIDATE, ORDER_CANCEL,
     BILL_VALIDATE) — or manually, when staff override the website status
     directly from Dolibarr instead of going through the native workflow."""
-    _require_sync_secret(x_sync_secret)
+    await _require_sync_secret(x_sync_secret)
     try:
         order = await orders_service.sync_order(order_id, payload.model_dump())
     except SupabaseConfigError as exc:
