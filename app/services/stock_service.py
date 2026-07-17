@@ -1,9 +1,7 @@
-import mimetypes
-
 from app.core.dolibarr_client import dolibarr_client
 from app.models.schemas import DolibarrProductResult, StockResult
 
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+MODULEPART = "produit"
 
 
 def _stock_status_from_count(stock_count: float) -> str:
@@ -73,26 +71,32 @@ async def get_live_stock(product_id: int, dolibarr_id: int) -> StockResult:
 async def _list_product_photo_files(ref: str) -> list[dict]:
     """Photo file entries from Dolibarr's own /documents listing (over
     HTTP), not the local filesystem — see DolibarrClient.list_documents for
-    why this replaced the old DOLIBARR_DOCUMENTS_ROOT approach."""
+    why this replaced the old DOLIBARR_DOCUMENTS_ROOT approach.
+
+    Dolibarr's real response uses `filename` (not `name`) for the file's
+    basename, `filepath` for its subfolder relative to the modulepart root
+    (e.g. "produit/<ref>"), and a `content-type` field that's more reliable
+    than guessing from the extension — confirmed against a live instance."""
     if not ref:
         return []
-    docs = await dolibarr_client.list_documents("produit", ref)
+    docs = await dolibarr_client.list_documents(MODULEPART, ref)
     photos = [
         d for d in docs
-        if isinstance(d, dict) and str(d.get("name", "")).lower().endswith(IMAGE_EXTENSIONS)
+        if isinstance(d, dict) and str(d.get("content-type", "")).startswith("image/")
     ]
-    photos.sort(key=lambda d: d.get("name", ""))
+    photos.sort(key=lambda d: d.get("filename", ""))
     return photos
 
 
 def _document_original_file(ref: str, doc: dict) -> str:
     """Builds the `original_file` path /documents/download expects, from a
-    /documents listing entry. Dolibarr's listing includes the file's
-    relative subdirectory (photos are usually under <ref>/photos/) — fall
-    back to just <ref>/<name> if that field isn't present."""
-    name = doc.get("name", "")
-    relpath = (doc.get("relpath") or doc.get("path") or "").strip("/")
-    return f"{ref}/{relpath}/{name}" if relpath else f"{ref}/{name}"
+    /documents listing entry: strip the modulepart prefix off `filepath` to
+    get the subfolder relative to it, then join with `filename`."""
+    filename = doc.get("filename", "")
+    filepath = (doc.get("filepath") or "").strip("/")
+    prefix = f"{MODULEPART}/"
+    subfolder = filepath[len(prefix):] if filepath.startswith(prefix) else ref
+    return f"{subfolder}/{filename}"
 
 
 async def get_product_photo_count(dolibarr_id: int) -> int:
@@ -111,8 +115,7 @@ async def get_product_photo_bytes(dolibarr_id: int, index: int = 0) -> tuple[byt
         return None
     doc = photos[index]
     original_file = _document_original_file(ref, doc)
-    content = await dolibarr_client.download_document_file("produit", original_file)
+    content = await dolibarr_client.download_document_file(MODULEPART, original_file)
     if not content:
         return None
-    content_type = mimetypes.guess_type(doc.get("name", ""))[0] or "image/jpeg"
-    return content, content_type
+    return content, doc.get("content-type") or "image/jpeg"
