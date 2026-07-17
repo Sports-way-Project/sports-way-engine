@@ -100,12 +100,24 @@ class SupabaseClient:
         """Confirms `access_token` is a genuinely live Supabase session and
         returns {id, email, ...}, or None if it isn't. Uses the anon key, not
         the service-role key — this call authenticates as the calling user,
-        not as an admin."""
-        self._require_configured()
-        response = await self._client.get(
-            f"{self._auth_base}/user",
-            headers={"Authorization": f"Bearer {access_token}", "apikey": settings.supabase_anon_key},
-        )
+        not as an admin.
+
+        Deliberately uses a fresh, standalone httpx client instead of
+        `self._client`: that client has the service-role key baked in as its
+        default Authorization/apikey headers for every other method here, and
+        this is the one call in the whole class that must NOT send the
+        service-role key at all. Relying on per-request headers to shadow a
+        client-level default for exactly the credential that matters is the
+        kind of thing that's fine until it silently isn't."""
+        if not settings.supabase_url or not settings.supabase_anon_key:
+            raise SupabaseConfigError(
+                "SUPABASE_URL and/or SUPABASE_ANON_KEY are not set in the backend's .env."
+            )
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{self._auth_base}/user",
+                headers={"Authorization": f"Bearer {access_token}", "apikey": settings.supabase_anon_key},
+            )
         if response.status_code != 200:
             return None
         return response.json()
