@@ -96,6 +96,25 @@ class SupabaseClient:
         rows = response.json()
         return rows[0] if rows else None
 
+    async def upsert_product(self, dolibarr_id: int, patch: dict) -> dict | None:
+        """Insert-or-update a `products` row keyed on `dolibarr_id` (existing
+        unique constraint) — used by the Dolibarr website-products module,
+        which is the source of truth for whether a product exists on the
+        website at all (the ~1200-product catalog is being rebuilt from
+        Dolibarr, not hand-entered here). PostgREST's merge-duplicates
+        resolution handles both "never synced before" (insert) and "already
+        linked" (update) with a single call."""
+        self._require_configured()
+        response = await self._client.post(
+            "/products",
+            params={"on_conflict": "dolibarr_id"},
+            json={**patch, "dolibarr_id": dolibarr_id},
+            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+        )
+        _raise_for_status(response)
+        rows = response.json()
+        return rows[0] if rows else None
+
     async def verify_user_token(self, access_token: str) -> dict | None:
         """Confirms `access_token` is a genuinely live Supabase session and
         returns {id, email, ...}, or None if it isn't. Uses the anon key, not

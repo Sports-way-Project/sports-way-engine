@@ -59,6 +59,36 @@ class DolibarrClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_product_by_barcode(self, barcode: str, include_stock: bool = True) -> dict | None:
+        client = await self._ensure_client()
+        response = await client.get(
+            f"/products/barcode/{barcode}",
+            params={"includestockdata": 1 if include_stock else 0},
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    async def get_product_by_art_no(self, art_no: str, include_stock: bool = True) -> dict | None:
+        """art_no isn't a native Dolibarr field — it's the `art_no` extrafield
+        the swwebsiteproducts module writes (see product_website_tab.php),
+        so it has no dedicated /products/... route like ref or barcode do and
+        has to go through sqlfilters against the extrafields table instead."""
+        client = await self._ensure_client()
+        safe_art_no = art_no.replace("'", "")
+        response = await client.get(
+            "/products",
+            params={
+                "sqlfilters": f"(ef.art_no:=:'{safe_art_no}')",
+                "limit": 1,
+                "includestockdata": 1 if include_stock else 0,
+            },
+        )
+        response.raise_for_status()
+        results = response.json()
+        return results[0] if results else None
+
     async def list_products(self, page: int = 0, limit: int = 100) -> list[dict]:
         client = await self._ensure_client()
         response = await client.get(
@@ -77,6 +107,12 @@ class DolibarrClient:
     async def get_invoice(self, dolibarr_invoice_id: str) -> dict:
         client = await self._ensure_client()
         response = await client.get(f"/invoices/{dolibarr_invoice_id}")
+        response.raise_for_status()
+        return response.json()
+
+    async def get_shipment(self, dolibarr_shipment_id: str | int) -> dict:
+        client = await self._ensure_client()
+        response = await client.get(f"/shipments/{dolibarr_shipment_id}")
         response.raise_for_status()
         return response.json()
 

@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Header, HTTPException, Query, Response
 
 from app.core.dolibarr_client import dolibarr_client
@@ -12,7 +14,15 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 DOCUMENT_KINDS = {
     "order": "commande",
     "invoice": "facture",
+    "shipment": "expedition",
 }
+
+# There's no separate "Livraison" (delivery receipt) module in this Dolibarr
+# install — htdocs/livraison/ doesn't exist. A shipment (expedition) IS the
+# delivery record here: it gets its own PDF once validated, and "classify
+# closed" on it is literally what our own trigger treats as "Delivered" (see
+# the trigger class). So "shipment PDFs" below cover delivery receipts too;
+# there's no third, separate document type to fetch.
 
 
 async def _require_sync_secret(x_sync_secret: str | None) -> None:
@@ -48,14 +58,79 @@ async def get_order(order_id: str):
     return order
 
 
+@router.get("/{order_id}/dolibarr-status")
+async def dolibarr_status(order_id: str, authorization: str | None = Header(None)):
+    """Whether the Dolibarr order/invoice this website order links to still
+    actually exists — dolibarr_order_id can outlive the real commande (it
+    used to never get cleared on delete; the trigger class fixed that going
+    forward, but older rows can still be stale), so the admin UI checks
+    live instead of assuming a stored id is still valid."""
+    await _require_admin(authorization)
+    try:
+        order = await orders_service.get_order(order_id)
+    except SupabaseConfigError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    async def _fetch(fetch_fn, dolibarr_id):
+        """Returns (exists, ref) — ref is Dolibarr's human ref (e.g. SO2607-0080),
+        nicer for the admin to see than the raw internal id."""
+        if not dolibarr_id:
+            return None, None
+        try:
+            obj = await fetch_fn(dolibarr_id)
+            return True, obj.get("ref")
+        except Exception:
+            return False, None
+
+    order_exists, order_ref = await _fetch(dolibarr_client.get_order, order.dolibarr_order_id)
+    invoice_exists, invoice_ref = await _fetch(dolibarr_client.get_invoice, order.dolibarr_invoice_id)
+
+    # DOLIBARR_API_URL points at .../htdocs/api/index.php — strip that off to
+    # get the browsable Dolibarr base URL for building admin-facing links
+    # (the admin needs to actually click through to the native order/invoice
+    # card, same as the Dolibarr-side list.php already links back the other way).
+    config = await get_dolibarr_config()
+    dolibarr_base_url = re.sub(r"/api/index\.php/?$", "", config["api_url"])
+
+    return {
+        "orderExists": order_exists,
+        "orderRef": order_ref,
+        "orderUrl": f"{dolibarr_base_url}/commande/card.php?id={order.dolibarr_order_id}" if order.dolibarr_order_id else None,
+        "invoiceExists": invoice_exists,
+        "invoiceRef": invoice_ref,
+        "invoiceUrl": f"{dolibarr_base_url}/compta/facture/card.php?id={order.dolibarr_invoice_id}" if order.dolibarr_invoice_id else None,
+    }
+
+
+def _extract_shipment_ids(order_obj: dict) -> list[int]:
+    """linkedObjectsIds on a Dolibarr commande is an associative array keyed
+    by element type (e.g. {'shipping': {123: 123, 124: 124}}) — pulls out
+    just the shipment ids, tolerating either a dict-of-ids or list-of-ids
+    shape since the REST API's JSON encoding of that PHP array can go
+    either way depending on whether the keys are sequential."""
+    linked = order_obj.get("linkedObjectsIds") or {}
+    shipping = linked.get("shipping") if isinstance(linked, dict) else None
+    if not shipping:
+        return []
+    if isinstance(shipping, dict):
+        return [int(v) for v in shipping.values()]
+    if isinstance(shipping, list):
+        return [int(v) for v in shipping]
+    return []
+
+
 @router.get("/{order_id}/documents")
 async def list_documents(order_id: str, authorization: str | None = Header(None)):
-    """Lists which Dolibarr PDFs (order/invoice) are available for this
-    website order, for the admin order-detail view. Requires an admin
-    session — unlike the other GET endpoints on this router, this one is
-    reachable directly from the browser and order IDs are guessable
-    (SWWO-YYMM#####), so it can't be left open like the Dolibarr-only
-    endpoints above."""
+    """Lists which Dolibarr PDFs are available for this website order — the
+    order itself, its invoice, and one entry per shipment (there's no
+    separate "delivery receipt" object in this Dolibarr install; a validated/
+    closed shipment IS the delivery record — see DOCUMENT_KINDS above).
+    Requires an admin session — unlike the other GET endpoints on this
+    router, this one is reachable directly from the browser and order IDs
+    are guessable (SWWO-YYMM#####), so it can't be left open like the
+    Dolibarr-only endpoints above."""
     await _require_admin(authorization)
     try:
         order = await orders_service.get_order(order_id)
@@ -64,22 +139,43 @@ async def list_documents(order_id: str, authorization: str | None = Header(None)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    available = []
-    if order.dolibarr_order_id:
-        available.append({"kind": "order", "label": "Dolibarr Order", "url": f"/orders/{order_id}/documents/order"})
+    if not order.dolibarr_order_id:
+        return {"documents": [], "orderDeleted": False}
+
+    # Confirm the commande actually still exists before offering ANY PDFs —
+    # a deleted order has nothing left to show a document for, and this also
+    # gives us the linked shipment ids in one call instead of a second round trip.
+    try:
+        order_obj = await dolibarr_client.get_order(order.dolibarr_order_id)
+    except Exception:
+        return {"documents": [], "orderDeleted": True}
+
+    available = [{"kind": "order", "label": "Dolibarr Order", "url": f"/orders/{order_id}/documents/order/{order.dolibarr_order_id}"}]
+
     if order.dolibarr_invoice_id:
-        available.append({"kind": "invoice", "label": "Invoice", "url": f"/orders/{order_id}/documents/invoice"})
-    return {"documents": available}
+        available.append({"kind": "invoice", "label": "Invoice", "url": f"/orders/{order_id}/documents/invoice/{order.dolibarr_invoice_id}"})
+
+    for shipment_id in _extract_shipment_ids(order_obj):
+        available.append({
+            "kind": "shipment",
+            "label": f"Shipment #{shipment_id}",
+            "url": f"/orders/{order_id}/documents/shipment/{shipment_id}",
+        })
+
+    return {"documents": available, "orderDeleted": False}
 
 
-@router.get("/{order_id}/documents/{kind}")
-async def download_document(order_id: str, kind: str, authorization: str | None = Header(None)):
+@router.get("/{order_id}/documents/{kind}/{dolibarr_id}")
+async def download_document(order_id: str, kind: str, dolibarr_id: str, authorization: str | None = Header(None)):
     """Streams the actual PDF back to the browser. Fetches the Dolibarr
     object first to resolve its `ref` (documents are stored on disk/served
-    by Dolibarr keyed by ref, not by internal numeric id)."""
+    by Dolibarr keyed by ref, not by internal numeric id). dolibarr_id is
+    taken from the caller rather than re-derived from the order record so
+    shipments (which aren't stored on the website order at all — there can
+    be several) work the same way as order/invoice."""
     await _require_admin(authorization)
     if kind not in DOCUMENT_KINDS:
-        raise HTTPException(status_code=400, detail="kind must be 'order' or 'invoice'")
+        raise HTTPException(status_code=400, detail="kind must be 'order', 'invoice', or 'shipment'")
 
     try:
         order = await orders_service.get_order(order_id)
@@ -87,14 +183,15 @@ async def download_document(order_id: str, kind: str, authorization: str | None 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-
-    dolibarr_id = order.dolibarr_order_id if kind == "order" else order.dolibarr_invoice_id
-    if not dolibarr_id:
-        raise HTTPException(status_code=404, detail=f"This order has no linked Dolibarr {kind} yet")
 
     modulepart = DOCUMENT_KINDS[kind]
     try:
-        obj = await dolibarr_client.get_order(dolibarr_id) if kind == "order" else await dolibarr_client.get_invoice(dolibarr_id)
+        if kind == "order":
+            obj = await dolibarr_client.get_order(dolibarr_id)
+        elif kind == "invoice":
+            obj = await dolibarr_client.get_invoice(dolibarr_id)
+        else:
+            obj = await dolibarr_client.get_shipment(dolibarr_id)
         ref = obj.get("ref")
         if not ref:
             raise HTTPException(status_code=502, detail=f"Dolibarr {kind} has no ref")

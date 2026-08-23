@@ -57,12 +57,25 @@ async def list_all_dolibarr_products() -> list[DolibarrProductResult]:
     return results
 
 
-async def get_live_stock(product_id: int, dolibarr_id: int) -> StockResult:
-    dolibarr_product = await dolibarr_client.get_product(dolibarr_id)
+async def get_live_stock(product_id: int, dolibarr_id: int, barcode: str = "", art_no: str = "") -> StockResult:
+    """Resolves the Dolibarr product the same way the swwebsiteproducts
+    module links them (see supabaseclient.class.php::linkAndUpsertProduct):
+    barcode first, then art_no, and dolibarr_id only as the last resort —
+    that priority is what lets this survive the linked Dolibarr product
+    having been deleted and recreated (new id, same barcode/art_no)."""
+    dolibarr_product = None
+    if barcode:
+        dolibarr_product = await dolibarr_client.get_product_by_barcode(barcode)
+    if dolibarr_product is None and art_no:
+        dolibarr_product = await dolibarr_client.get_product_by_art_no(art_no)
+    if dolibarr_product is None:
+        dolibarr_product = await dolibarr_client.get_product(dolibarr_id)
+
     stock_count = _extract_stock_count(dolibarr_product)
+    resolved_id = int(dolibarr_product.get("id", dolibarr_id))
     return StockResult(
         product_id=product_id,
-        dolibarr_id=dolibarr_id,
+        dolibarr_id=resolved_id,
         stock_count=stock_count,
         stock_status=_stock_status_from_count(stock_count),
     )

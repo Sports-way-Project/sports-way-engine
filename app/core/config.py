@@ -4,9 +4,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    dolibarr_api_url: str
-    dolibarr_api_key: str
-    dolibarr_verify_ssl: bool = True
+    # Which Dolibarr this backend talks to — see dolibarr_api_url / api_key /
+    # verify_ssl below, which resolve to the matching *_local or *_production
+    # value. Flip DOLIBARR_MODE in .env to switch the whole backend over.
+    dolibarr_mode: str = "local"
+
+    dolibarr_api_url_local: str = ""
+    dolibarr_api_key_local: str = ""
+    dolibarr_verify_ssl_local: bool = True
+
+    dolibarr_api_url_production: str = ""
+    dolibarr_api_key_production: str = ""
+    dolibarr_verify_ssl_production: bool = True
 
     cors_origins: str = "http://localhost:5173"
 
@@ -37,6 +46,18 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def dolibarr_api_url(self) -> str:
+        return self.dolibarr_api_url_production if self.dolibarr_mode == "production" else self.dolibarr_api_url_local
+
+    @property
+    def dolibarr_api_key(self) -> str:
+        return self.dolibarr_api_key_production if self.dolibarr_mode == "production" else self.dolibarr_api_key_local
+
+    @property
+    def dolibarr_verify_ssl(self) -> bool:
+        return self.dolibarr_verify_ssl_production if self.dolibarr_mode == "production" else self.dolibarr_verify_ssl_local
 
 
 settings = Settings()

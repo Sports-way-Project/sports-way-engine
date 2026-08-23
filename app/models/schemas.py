@@ -79,3 +79,14 @@ class OrderSyncRequest(BaseModel):
     dolibarr_order_id: str | None = None
     dolibarr_invoice_id: str | None = None
     status: str | None = None
+
+
+class ProductSyncRequest(BaseModel):
+    name: str | None = None
+    dolibarr_ref: str | None = None
+    categories: list[str] | None = None
+    brand: str | None = None
+    art_no: str | None = None
+    name_ar: str | None = None
+    color: str | None = None
+    show_on_website: bool | None = None
