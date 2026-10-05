@@ -6,6 +6,7 @@ from app.core.dolibarr_client import dolibarr_client
 from app.core.supabase_client import supabase_client
 from app.routers import admin, chat, notifications, orders, products, stock
 
+// fastapi app
 app = FastAPI(title="Sports Way FastAPI Core")
 
 app.add_middleware(
